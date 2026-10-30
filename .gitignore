@@ -1,0 +1,17 @@
+# build output
+/FileMender.exe
+build/
+*.o
+*.res
+
+# test artifacts
+tests/*.exe
+tests/*.bmp
+tests/*.png
+tests/*.bin
+tests/*.txt
+
+# local
+*.log
+Thumbs.db
+desktop.ini

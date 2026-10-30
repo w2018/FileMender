@@ -1,0 +1,112 @@
+name: build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（例如 1.0.0），仅在手动触发时使用"
+        required: false
+        default: "1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  windows-x64:
+    name: build (windows x64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MinGW-w64 (MSYS2)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: mingw-w64-x86_64-gcc
+          path-type: inherit
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${{ github.event.inputs.version }}"
+            VERSION="${VERSION:-1.0.0}"
+          fi
+          MAJOR="${VERSION%%.*}"
+          REST="${VERSION#*.}"
+          if [ "$REST" = "$VERSION" ]; then REST="0.0"; fi
+          MINOR="${REST%%.*}"
+          PATCH="${REST#*.}"
+          if [ "$PATCH" = "$REST" ]; then PATCH="0"; fi
+          PATCH="${PATCH%%[!0-9]*}"
+          if [ -z "$PATCH" ]; then PATCH=0; fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "major=$MAJOR"     >> "$GITHUB_OUTPUT"
+          echo "minor=$MINOR"     >> "$GITHUB_OUTPUT"
+          echo "patch=$PATCH"     >> "$GITHUB_OUTPUT"
+          echo "resolved version: $VERSION ($MAJOR.$MINOR.$PATCH)"
+
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          set -e
+          windres --codepage=65001 \
+            -DFM_VER_MAJOR=${{ steps.ver.outputs.major }} \
+            -DFM_VER_MINOR=${{ steps.ver.outputs.minor }} \
+            -DFM_VER_PATCH=${{ steps.ver.outputs.patch }} \
+            -I res res/app.rc -O coff -o app.res
+
+          gcc -std=c11 -Os -s -municode -mwindows \
+            -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0A00 \
+            -DFM_VERSION_TEXT='"${{ steps.ver.outputs.version }}"' \
+            -finput-charset=UTF-8 -fexec-charset=UTF-8 \
+            -Wall -Wextra -Wl,--gc-sections \
+            src/main.c src/ui.c src/fileops.c src/util.c src/hash.c app.res \
+            -o FileMender.exe \
+            -lgdi32 -luser32 -lcomdlg32 -lshell32 -lcomctl32 -lole32 -luuid -static
+
+          ls -l FileMender.exe
+          sha256sum FileMender.exe
+
+      - name: Self test (hash + file ops)
+        shell: msys2 {0}
+        run: |
+          set -e
+          gcc -std=c11 -O2 -o hash_test.exe tests/hash_test.c src/hash.c
+          ./hash_test.exe
+          gcc -std=c11 -O2 -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0A00 \
+            -finput-charset=UTF-8 -fexec-charset=UTF-8 \
+            tests/ops_test.c src/fileops.c src/util.c -o ops_test.exe -ladvapi32
+          ./ops_test.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FileMender-${{ steps.ver.outputs.version }}-win64
+          path: FileMender.exe
+          if-no-files-found: error
+
+      - name: Create release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: FileMender ${{ steps.ver.outputs.version }}
+          tag_name: ${{ github.ref_name }}
+          body: |
+            文件属性修改器 ${{ steps.ver.outputs.version }}（Windows x64 单文件）
+
+            - 纯 C + Win32 实现，单文件 exe，无需安装、无运行库依赖
+            - 改文件名、改创建 / 修改 / 访问时间，本地计算 MD5 / SHA-1 / SHA-256
+          files: FileMender.exe
+          fail_on_unmatched_files: true
+          generate_release_notes: false
